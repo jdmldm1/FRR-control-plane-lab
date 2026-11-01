@@ -1,0 +1,2 @@
+# Scripts and FRR configs run inside Linux containers: always LF.
+* text=auto eol=lf

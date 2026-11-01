@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: iperf
+  namespace: frr-lab
+  labels: { app: iperf }
+spec:
+  selector:
+    matchLabels: { app: iperf }
+  template:
+    metadata:
+      labels: { app: iperf }
+    spec:
+      hostNetwork: true
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: iperf
+          image: networkstatic/iperf3:latest
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          command:
+            - sh
+            - -c
+            - |
+              case "$NODE_NAME" in
+                frr-control-plane) LO=10.255.0.1 ;;
+                frr-worker) LO=10.255.0.2 ;;
+                frr-worker2) LO=10.255.0.3 ;;
+                frr-worker3) LO=10.255.0.4 ;;
+              esac
+              until grep -q "$LO" /proc/net/fib_trie; do sleep 2; done
+              # A wildcard UDP server would reply from an interface address, which the client drops.
+              iperf3 -s -B "$LO" -p 5201 -D
+              iperf3 -s -B "$LO" -p 5202 -D
+              iperf3 -s -B "$LO" -p 5203 -D
+              exec iperf3 -s -B "$LO" -p 5204

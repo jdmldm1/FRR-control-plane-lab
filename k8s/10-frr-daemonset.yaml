@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: frr
+  namespace: frr-lab
+  labels: { app: frr }
+spec:
+  selector:
+    matchLabels: { app: frr }
+  template:
+    metadata:
+      labels: { app: frr }
+    spec:
+      hostNetwork: true
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        - name: config
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp /config/$NODE_NAME.conf /etc/frr/frr.conf
+              cp /config/$NODE_NAME.daemons /etc/frr/daemons
+              cp /config/vtysh.conf /etc/frr/vtysh.conf
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: etc-frr, mountPath: /etc/frr }
+      containers:
+        - name: frr
+          image: quay.io/frrouting/frr:10.2.1
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - { name: etc-frr, mountPath: /etc/frr }
+            - { name: run-frr, mountPath: /var/run/frr }
+        - name: agent
+          image: frr-control-plane/agent:dev
+          imagePullPolicy: Never
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - { name: LISTEN_ADDR, value: ":8080" }
+            - { name: INTERVAL, value: "2s" }
+            - { name: HISTORY_DB, value: /var/lib/frr-control-plane/history.db }
+            - name: ALERT_WEBHOOK
+              valueFrom: { configMapKeyRef: { name: frr-alerts, key: webhook, optional: true } }
+          ports:
+            - { name: dashboard, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: etc-frr, mountPath: /etc/frr }
+            - { name: run-frr, mountPath: /var/run/frr }
+            - { name: history, mountPath: /var/lib/frr-control-plane }
+      volumes:
+        - name: config
+          configMap: { name: frr-config }
+        - name: etc-frr
+          emptyDir: {}
+        - name: run-frr
+          emptyDir: {}
+        - name: history
+          hostPath: { path: /var/lib/frr-control-plane, type: DirectoryOrCreate }

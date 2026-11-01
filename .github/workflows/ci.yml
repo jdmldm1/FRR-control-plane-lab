@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: Bring the full lab up and check failover (needs the CONTROL_PLANE_TOKEN secret)
+        type: boolean
+        default: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: go vet ./... && go test ./...
+      - name: Shell scripts parse
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+      - name: FRR configs exist for every node
+        run: for n in frr-control-plane frr-worker frr-worker2 frr-worker3; do test -f frr/$n.conf && test -f frr/$n.daemons; done
+
+  kind-lab:
+    # Heavy (4-node cluster, image build): manual runs only. The agent image is
+    # built from the private FRR-control-plane repo, checked out with a token
+    # (a fine-grained PAT with read access, saved as CONTROL_PLANE_TOKEN).
+    if: github.event_name == 'workflow_dispatch' && inputs.kind
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/FRR-control-plane
+          token: ${{ secrets.CONTROL_PLANE_TOKEN }}
+          path: control-plane
+      - uses: helm/kind-action@v1
+        with: { install_only: true }
+      - run: scripts/up.sh
+        env: { CONTROL_PLANE_DIR: control-plane }
+      - name: Every node's dashboard sees the three other routers
+        run: |
+          for p in 8081 8082 8083 8084; do
+            for i in $(seq 1 60); do
+              n=$(curl -s localhost:$p/api/v1/reachability | jq '[.rows[] | select(.reachable)] | length')
+              [ "$n" -ge 3 ] && break
+              sleep 2
+            done
+            echo ":$p reaches $n routers"; [ "$n" -ge 3 ]
+          done
+      - name: A reaches C over two ECMP paths, and over D alone once A-B is cut
+        run: |
+          curl -s localhost:8081/api/v1/topology | jq -e '.nodes[] | select(.routerId=="10.255.0.3") | .route.nextHops | length == 2'
+          scripts/fault.sh down a b
+          sleep 3
+          curl -s localhost:8081/api/v1/topology | jq -e '.nodes[] | select(.routerId=="10.255.0.3") | .route.nextHops == ["10.10.14.4"]'
